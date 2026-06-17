@@ -2,7 +2,7 @@
   "EnvironmentVariables": [
     {
       "SchemaName": "sample_APIBaseURLDemo",
-      "Value": "",
+      "Value": "https://api.stg.contoso.com/v1",
       "Name": {
         "Default": "API Base URL (Demo)",
         "ByLcid": {
@@ -16,7 +16,7 @@
   "ConnectionReferences": [
     {
       "LogicalName": "sample_OutlookDemo",
-      "ConnectionId": "",
+      "ConnectionId": "bf9d19248c4d44e4b46d9b97b7b3e414",
       "ConnectorId": "/providers/Microsoft.PowerApps/apis/shared_office365"
     }
   ],
