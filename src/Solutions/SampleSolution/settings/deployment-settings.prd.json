@@ -1,0 +1,24 @@
+{
+  "EnvironmentVariables": [
+    {
+      "SchemaName": "sample_APIBaseURLDemo",
+      "Value": "",
+      "Name": {
+        "Default": "API Base URL (Demo)",
+        "ByLcid": {
+          "1041": "API Base URL (Demo)"
+        }
+      },
+      "TypeId": 100000000,
+      "IsRequired": false
+    }
+  ],
+  "ConnectionReferences": [
+    {
+      "LogicalName": "sample_OutlookDemo",
+      "ConnectionId": "",
+      "ConnectorId": "/providers/Microsoft.PowerApps/apis/shared_office365"
+    }
+  ],
+  "CopilotAgents": []
+}
