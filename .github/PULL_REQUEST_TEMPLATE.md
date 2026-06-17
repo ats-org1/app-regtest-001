@@ -24,5 +24,5 @@
 
 ## 関連ドキュメント
 
-- リリース動線全体: [07-workflow-spec.md](https://github.com/__COE_CENTRAL_OWNER__/coe-central-repo/blob/main/docs/design/07-workflow-spec.md)
-- ブランチ運用: [05-branching-source-control.md](https://github.com/__COE_CENTRAL_OWNER__/coe-central-repo/blob/main/docs/design/05-branching-source-control.md)
+- リリース動線全体: [07-workflow-spec.md](https://github.com/ats-org1/coe-central-repo/blob/main/docs/design/07-workflow-spec.md)
+- ブランチ運用: [05-branching-source-control.md](https://github.com/ats-org1/coe-central-repo/blob/main/docs/design/05-branching-source-control.md)
