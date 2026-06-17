@@ -33,6 +33,6 @@ permissions:
 
 jobs:
   build:
-    uses: __COE_CENTRAL_OWNER__/coe-central-repo/.github/workflows/_reusable-build-pack.yml@main
+    uses: ats-org1/coe-central-repo/.github/workflows/_reusable-build-pack.yml@main
     with:
       solution_name: ${{ inputs.solution_name || 'SampleSolution' }}
