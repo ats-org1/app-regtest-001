@@ -1,0 +1,57 @@
+name: '01-export-from-dev'
+
+# Maker の「export 依頼」ボタンから起動される薄いラッパー。
+# 実体は coe-central-repo の _reusable-export.yml にあり、本ファイルはトリガ定義と
+# 呼び出し元 repo 固有の Variables 受け渡しのみを担う。
+#
+# 【中央化の理由】Entra ID FIC が 20 件/SPN 上限のため、案件 repo ごとに FIC を
+# 追加する構成ではすぐに枯渇する。中央 reusable workflow + OIDC sub claim
+# customization (provision-app-repo.yml Step 04.5 で適用済み) により、FIC は中央
+# reusable workflow ごとに 1 個で全案件 repo から使える。
+#
+# STEP-OWNER: 表 2 Step 4 (Export) を担う。実行者 = Maker (dispatch)、種別 = 自動。
+
+on:
+  workflow_dispatch:
+    inputs:
+      solution_name:
+        description: 'Solution の Unique Name（例: SampleSolution）'
+        required: true
+        default: 'SampleSolution'
+      bump_type:
+        description: 'Version の上げ幅 (ADR-008): revision / patch / minor / major。未指定は revision。'
+        required: false
+        type: choice
+        default: 'revision'
+        options:
+          - revision
+          - patch
+          - minor
+          - major
+      reason:
+        description: 'export 理由（commit message / PR 本文に転記）'
+        required: false
+        default: 'Maker からの export 依頼'
+      open_release_pr:
+        description: 'true = develop→main の release PR を起票 (STG へデプロイ)。false = develop に保存のみ。'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: write    # 即時 merge ケースで reusable 内から deploy-to-stg.yml を dispatch するため
+  id-token: write   # 中央 reusable workflow が OIDC を使うため必要
+
+jobs:
+  export:
+    uses: __COE_CENTRAL_OWNER__/coe-central-repo/.github/workflows/_reusable-export.yml@main
+    with:
+      solution_name: ${{ inputs.solution_name }}
+      bump_type: ${{ inputs.bump_type }}
+      reason: ${{ inputs.reason }}
+      open_release_pr: ${{ inputs.open_release_pr }}
+      env_dev_url: ${{ vars.PP_ENV_DEV_URL }}
+      app_client_id_devstg: ${{ vars.PP_APP_CLIENT_ID_DEVSTG }}
+      tenant_id: ${{ vars.PP_TENANT_ID }}

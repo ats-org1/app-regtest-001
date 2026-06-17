@@ -1,0 +1,104 @@
+# Maker - PRD 環境へデプロイ
+#
+# 【代替案 (v0)】 CICD コンパニオン App が未配備の案件で、
+# Maker が GitHub Actions UI から直接 PRD デプロイを依頼するためのラッパー。
+#
+# 内部的に 05-deploy-to-prd.yml を dispatch する。
+# 中央 _reusable-deploy-prd.yml が以下を実行:
+#   1. preflight: git_tag で指定された Release / asset / settings.prd.json の検証
+#   2. Release から managed solution zip を `gh release download` で取得
+#      → STG で動作確認した「まさにそのバイナリ」が PRD に流れる (A2 設計)
+#   3. environment: prd の reviewer 承認待ち (CoE が承認 = 実 gate)
+#   4. PRD SPN を使って OIDC ログイン → pac solution import
+#
+# 【操作】
+#   1. 先に maker-05 (env=stg) で `v<version>-stg-verified` タグを付与済みであること
+#      (= STG 動作確認 OK の証跡)
+#   2. 必要なら maker-04 で PRD settings (接続情報・環境変数) を更新済みであること
+#   3. Actions タブ → "Maker - PRD 環境へデプロイ" → "Run workflow"
+#   4. inputs (solution_name / git_tag / reason) を入力して Run
+#   5. CoE による reviewer 承認画面 (Environment: prd) で承認待ち → 承認後 deploy 実行
+#
+# 【git_tag に何を指定するか】
+#   maker-05 (env=stg) で打った `v<version>-stg-verified` タグを指定する。
+#   このタグの Release に attach された managed solution zip がそのまま PRD に流れる。
+#   例: `v0.1.0-stg-verified`
+#
+# 【前提】
+#   - maker-05 (env=stg) を実行済み (= GitHub Release v<version>-stg-verified が存在)
+#   - PRD settings (deployment-settings.prd.json) の値が埋まっていること
+#     (未入力なら maker-04 で先に登録、deploy-to-prd preflight で fail させる)
+#   - GitHub Environment `prd` に CoE が reviewer として登録済み
+#
+# 【完了後】
+#   - PRD reviewer 承認待ち → 承認 → PRD import 完了
+#   - 続けて Maker が PRD で動作確認 → OK なら maker-05 (env=prd) で
+#     `v<version>-prd-verified` タグを付与し本番リリース完了
+
+name: Maker - PRD 環境へデプロイ
+
+run-name: "PRD デプロイ: ${{ inputs.solution_name }} ${{ inputs.git_tag }} (by @${{ github.actor }})"
+
+on:
+  workflow_dispatch:
+    inputs:
+      solution_name:
+        description: "デプロイする Solution の Unique Name"
+        required: true
+        type: string
+        default: "SampleSolution"
+      git_tag:
+        description: "PRD に流す Release tag (maker-05 env=stg で打った v<version>-stg-verified)"
+        required: true
+        type: string
+        default: "v0.1.0-stg-verified"
+      reason:
+        description: "PRD deploy 理由 (CoE 承認時に表示 / 監査ログ用) - 200 字程度"
+        required: true
+        type: string
+        default: "STG 動作確認 OK、PRD 反映"
+
+permissions:
+  actions: write   # 内部 workflow を dispatch するために必要
+  contents: read
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate git_tag format
+        env:
+          GIT_TAG: ${{ inputs.git_tag }}
+        run: |
+          set -euo pipefail
+          # maker-05 で付ける tag 命名規約: v<MAJOR>.<MINOR>.<PATCH>-stg-verified
+          if [[ ! "$GIT_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-stg-verified$ ]]; then
+            echo "::error::git_tag は 'v<MAJOR>.<MINOR>.<PATCH>-stg-verified' 形式で入力してください (例: v0.1.0-stg-verified)。入力値: '$GIT_TAG'"
+            echo "::error::PRD に流すバイナリは STG で動作確認済みのものに限定するため、-stg-verified タグのみ受け付けます。"
+            exit 1
+          fi
+
+      - name: Dispatch 05-deploy-to-prd
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOLUTION_NAME: ${{ inputs.solution_name }}
+          GIT_TAG: ${{ inputs.git_tag }}
+          REASON: ${{ inputs.reason }}
+        run: |
+          set -euo pipefail
+          echo "::notice::Dispatching 05-deploy-to-prd for ${SOLUTION_NAME} (${GIT_TAG})"
+          # 内部 dispatch は常に develop ブランチから起動 (Maker のドロップダウン選択ミスを隠蔽)。
+          gh workflow run 05-deploy-to-prd \
+            --repo "${{ github.repository }}" \
+            --ref develop \
+            -f solution_name="${SOLUTION_NAME}" \
+            -f git_tag="${GIT_TAG}" \
+            -f reason="${REASON}"
+
+      - name: Show status link
+        run: |
+          ACTIONS_URL="${{ github.server_url }}/${{ github.repository }}/actions/workflows/deploy-to-prd.yml"
+          echo "::notice::PRD デプロイを起動しました。"
+          echo "::notice::CoE による reviewer 承認待ちです (Environment: prd)。"
+          echo "::notice::進捗: ${ACTIONS_URL}"
+          echo "::notice::承認後、Release '${{ inputs.git_tag }}' に attach された managed zip が PRD に import されます (build はしません = STG と同一バイナリ)"

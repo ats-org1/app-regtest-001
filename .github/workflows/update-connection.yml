@@ -1,0 +1,375 @@
+# Update deployment-settings.<env>.json (full-file replacement)
+#
+# Triggered by Maker UX (CICD コンパニオン Canvas → Power Automate →
+# workflow_dispatch). 「接続情報・環境変数 登録/更新 UI」から呼び出される
+# 裏ワークフロー。CoE は関与せず、Maker が自走できるようにするための
+# 薄いラッパー。
+#
+# v0 方針: Maker UX 側は settings JSON をそのまま multi-line TextInput で
+#   表示・編集させ、編集後の JSON を丸ごと送る。workflow 側は受け取った
+#   JSON を validate して src/Solutions/<solution_name>/settings/deployment-settings.<env>.json を
+#   そのまま上書きする (差分マージはしない)。
+#   将来「変数を 1 行ずつ追加・削除する凝った UI」が必要になったら、
+#   その時点で op-based の差分入力に拡張する。
+#
+# 流れ (Option A: 2026-06-04 / env ごとに判断を非対称化):
+#   STG (env=stg):
+#     1. develop branch を checkout
+#     2. inputs.settings_json を valid な JSON か検証
+#     3. src/Solutions/<solution_name>/settings/deployment-settings.stg.json を丸ごと上書き
+#     4. develop に直 commit (rebase retry 付き)
+#     5. main には流さない — 次回 Maker - STG 環境へデプロイ (maker-01) で
+#        develop ごと main に取り込まれた時に新しい settings が main に届く
+#
+#   PRD (env=prd):
+#     1～4. 同上 (develop に丸ごと上書き — Maker UX の読み込み元として一貫させる)
+#     5. **main から短命 branch `settings-prd/<solution_name>-<timestamp>` を作り**、
+#        そこに deployment-settings.prd.json **1 ファイルだけ** を書き込んで commit/push
+#     6. base=main, head=settings-prd/... で PR を起票 + auto-merge + --delete-branch
+#        — develop→main PR を使わないため、develop に積んだ他 Solution の未検証 commit が
+#          同乗して main に取り込まれる「同乗問題」が起きない
+#        — 今回の設計は WS 共有済みスライド 36 「ソース管理イメージ」の deploy-prd branch パターンと同じ
+#
+# この非対称設計の理由 (A 案 + スライド 36 準拠):
+#   - STG settings は Maker が試行錯誤しながら何度も押す → 空 Value / placeholder 中間状態が
+#     main に履歴として残るのを避けたい → 09 の release PR で「動作確認準備完了」単位で
+#     まとめて main に取り込む。
+#   - PRD settings は本番投入直前に 1 回入れる表計、中間値は生じない (生じたらろ preflight で落ちる)。
+#   - **PRD 用 PR は settings.prd.json 1 ファイルの差分に限定** されるため、レビュー / 監査が明快で、
+#     他 Solution の未検証 commit が課される事態も閃避される。
+#   - Maker は branch を意識せず、「stg/prd の設定をどこまで入れたか」は develop を見れば必ず判る
+#     (STG は main にまだ反映されていない可能性があるため、main を見ると誤識する)。
+#
+# 注意:
+#   - **deploy はこの workflow ではしない** (Step 09 / 17 の Maker UX 側が担当)
+#   - main への反映は env=prd の時だけ、main から派生した short-lived branch 経由で行う (main 直 push はしない)
+#   - 同時実行制御: 同一 env + solution に対しては concurrency でシリアル化
+#   - 初回 Step 09 (maker-01) をまだ一度も成功させていない (= main に Solution source が存在しない) 状態で
+#     env=prd を押すと fail させる (settings.prd.json だけが main に出る不整合を防ぐため)
+
+name: update-connection
+
+on:
+  workflow_dispatch:
+    inputs:
+      env:
+        description: "対象環境 (stg | prd)"
+        required: true
+        type: choice
+        options:
+          - stg
+          - prd
+      solution_name:
+        description: "Solution 内部名 (例: ContosoSales)。保存先 src/Solutions/<solution_name>/settings/ を特定するキー"
+        required: true
+        type: string
+      settings_json:
+        description: "deployment-settings.<env>.json の新しい中身 (Maker UX で編集した JSON 全文)"
+        required: true
+        type: string
+
+concurrency:
+  group: update-connection-${{ inputs.env }}-${{ inputs.solution_name }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pull-requests: write   # env=prd の release PR 起票 + auto-merge
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout develop
+        uses: actions/checkout@v4
+        with:
+          ref: develop
+          fetch-depth: 0
+
+      - name: Validate inputs
+        env:
+          SETTINGS_JSON: ${{ inputs.settings_json }}
+        run: |
+          set -euo pipefail
+          if [[ ! "${{ inputs.env }}" =~ ^(stg|prd)$ ]]; then
+            echo "::error::env must be 'stg' or 'prd'"
+            exit 1
+          fi
+
+          # settings_json は valid な JSON (object) であること
+          if ! echo "$SETTINGS_JSON" | jq -e 'type == "object"' > /dev/null; then
+            echo "::error::settings_json must be a JSON object"
+            exit 1
+          fi
+
+      - name: Overwrite deployment-settings.<env>.json
+        env:
+          ENV_NAME: ${{ inputs.env }}
+          SOLUTION_NAME: ${{ inputs.solution_name }}
+          SETTINGS_JSON: ${{ inputs.settings_json }}
+        run: |
+          set -euo pipefail
+          FILE="src/Solutions/${SOLUTION_NAME}/settings/deployment-settings.${ENV_NAME}.json"
+          if [[ ! -f "$FILE" ]]; then
+            echo "::error::Settings file not found on develop: $FILE"
+            echo "::error::先に 'Maker - DEV から保存' (maker-00) を実行して雛型を生成してください (Step 08.6)"
+            exit 1
+          fi
+
+          # pretty-print して書き出し (差分を見やすくする)
+          echo "$SETTINGS_JSON" | jq '.' > "$FILE"
+
+          echo "Updated $FILE"
+          diff <(git show "HEAD:$FILE") "$FILE" || true
+
+      - name: Commit to develop (with rebase retry on contention)
+        env:
+          ENV_NAME: ${{ inputs.env }}
+          SOLUTION_NAME: ${{ inputs.solution_name }}
+        run: |
+          set -euo pipefail
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "src/Solutions/${SOLUTION_NAME}/settings/deployment-settings.${ENV_NAME}.json"
+
+          # 差分が無いなら no-op で抜ける
+          if git diff --cached --quiet; then
+            echo "::notice::No changes to commit (settings already up to date)."
+            exit 0
+          fi
+
+          git commit -m "chore(${ENV_NAME}): update deployment-settings for ${SOLUTION_NAME}"
+          # 複数 Maker 並行時の競合対策: rebase 付き push を最大 3 回 retry
+          for i in 1 2 3; do
+            if git pull --rebase origin develop && git push origin develop; then
+              echo "::notice::develop へ push 成功 (attempt $i)"
+              exit 0
+            fi
+            echo "::warning::push 失敗 (attempt $i)、retry します"
+            sleep 5
+          done
+          echo "::error::develop への push に 3 回失敗しました。他の Maker との同時作業か、branch protection を確認してください。"
+          exit 1
+
+      # ───────────────────────────────────────────────────────────
+      # env=prd の時だけ: main から short-lived branch を切って settings.prd.json だけ PR 起票 + auto-merge
+      # (スライド 36 「ソース管理イメージ」の deploy-prd branch パターン)
+      # develop→main PR を使わないため、他 Solution の未検証 commit が同乗して main に出る事態を防げる
+      # ───────────────────────────────────────────────────────────
+      - name: Create short-lived branch from main and write settings.prd.json (env=prd only)
+        id: prd_branch
+        if: inputs.env == 'prd'
+        env:
+          SOLUTION_NAME: ${{ inputs.solution_name }}
+          SETTINGS_JSON: ${{ inputs.settings_json }}
+        run: |
+          set -euo pipefail
+
+          # main 上に Solution source が存在していることを確認 (= 初回 Step 09 が一度以上成功していること)
+          # settings.prd.json だけが main に出る不整合を防ぐための gate
+          git fetch origin main --depth=1
+          if ! git ls-tree -r --name-only origin/main | grep -q "^src/Solutions/${SOLUTION_NAME}/"; then
+            echo "::error::main に src/Solutions/${SOLUTION_NAME}/ がありません。先に 'Maker - STG 環境へデプロイ' (maker-01, Step 09) を 1 度成功させて Solution source を main に乗せてから、本 step をもう一度押してください。"
+            exit 1
+          fi
+
+          # 短命 branch 名 (タイムスタンプで一意化、コロンは branch 名不可のためハイフンに置換)
+          TS=$(date -u +%Y%m%d-%H%M%S)
+          BRANCH="settings-prd/${SOLUTION_NAME}-${TS}"
+
+          # main HEAD から短命 branch を切る (現在 develop を checkout しているので -B で上書き)
+          git checkout -B "${BRANCH}" origin/main
+
+          # settings.prd.json 1 ファイルのみ上書き (develop と同じ内容)
+          mkdir -p "src/Solutions/${SOLUTION_NAME}/settings"
+          echo "${SETTINGS_JSON}" | jq '.' > "src/Solutions/${SOLUTION_NAME}/settings/deployment-settings.prd.json"
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "src/Solutions/${SOLUTION_NAME}/settings/deployment-settings.prd.json"
+
+          if git diff --cached --quiet; then
+            echo "::notice::main 上の settings.prd.json と差分なし。short-lived branch を作らず終了します。"
+            echo "branch=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git commit -m "chore(prd-settings): update deployment-settings for ${SOLUTION_NAME}"
+          git push origin "${BRANCH}"
+          echo "branch=${BRANCH}" >> "$GITHUB_OUTPUT"
+
+      - name: Open PR (settings-prd/* → main) and auto-merge
+        if: inputs.env == 'prd' && steps.prd_branch.outputs.branch != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOLUTION_NAME: ${{ inputs.solution_name }}
+          BRANCH: ${{ steps.prd_branch.outputs.branch }}
+          ACTOR: ${{ github.actor }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          FILE="src/Solutions/${SOLUTION_NAME}/settings/deployment-settings.prd.json"
+
+          # ===== PR description schema 駆動生成 (P9-①) =====
+          # IT DRI が承認画面 "View environment" → この PR に飛んで来たとき、
+          # どの ConnectionRef / EnvVar が今回更新されたかを 1 画面で把握できる構造にする。
+
+          # OLD = main HEAD 時点の settings.prd.json (origin/main fetch 済み、prd_branch step で git fetch 完了)
+          OLD_JSON=$(git show "origin/main:${FILE}" 2>/dev/null || echo "")
+          # NEW = 今 branch に書き出したファイル (= main から派生した短命 branch の HEAD)
+          NEW_JSON=$(cat "${FILE}")
+
+          # EnvironmentVariables の差分行 (SchemaName / 旧値 / 新値)
+          if [ -n "$OLD_JSON" ]; then
+            ENVVAR_DIFF=$(jq -n --argjson old "$OLD_JSON" --argjson new "$NEW_JSON" '
+              ($old.EnvironmentVariables // []) as $o
+              | ($new.EnvironmentVariables // []) as $n
+              | (($o | map(.SchemaName)) + ($n | map(.SchemaName)) | unique) as $keys
+              | [
+                  $keys[] as $k
+                  | ($o | map(select(.SchemaName == $k)) | .[0]) as $oe
+                  | ($n | map(select(.SchemaName == $k)) | .[0]) as $ne
+                  | if $oe == null then
+                      "| `\($k)` | (なし) | `\($ne.Value // "")` | 追加 |"
+                    elif $ne == null then
+                      "| `\($k)` | `\($oe.Value // "")` | (削除) | 削除 |"
+                    elif (($oe.Value // "") != ($ne.Value // "")) then
+                      "| `\($k)` | `\($oe.Value // "")` | `\($ne.Value // "")` | 変更 |"
+                    else empty
+                    end
+                ] | .[]
+            ' 2>/dev/null || echo "")
+          else
+            ENVVAR_DIFF=$(jq -n --argjson new "$NEW_JSON" '
+              ($new.EnvironmentVariables // []) | .[]
+              | "| `\(.SchemaName)` | (新規) | `\(.Value // "")` | 追加 |"
+            ' 2>/dev/null || echo "")
+          fi
+
+          # ConnectionReferences の差分行 (LogicalName / 旧 ConnectionId / 新 ConnectionId)
+          if [ -n "$OLD_JSON" ]; then
+            CONNREF_DIFF=$(jq -n --argjson old "$OLD_JSON" --argjson new "$NEW_JSON" '
+              ($old.ConnectionReferences // []) as $o
+              | ($new.ConnectionReferences // []) as $n
+              | (($o | map(.LogicalName)) + ($n | map(.LogicalName)) | unique) as $keys
+              | [
+                  $keys[] as $k
+                  | ($o | map(select(.LogicalName == $k)) | .[0]) as $oe
+                  | ($n | map(select(.LogicalName == $k)) | .[0]) as $ne
+                  | if $oe == null then
+                      "| `\($k)` | (なし) | `\($ne.ConnectionId // "")` | 追加 |"
+                    elif $ne == null then
+                      "| `\($k)` | `\($oe.ConnectionId // "")` | (削除) | 削除 |"
+                    elif (($oe.ConnectionId // "") != ($ne.ConnectionId // "")) then
+                      "| `\($k)` | `\($oe.ConnectionId // "")` | `\($ne.ConnectionId // "")` | 変更 |"
+                    else empty
+                    end
+                ] | .[]
+            ' 2>/dev/null || echo "")
+          else
+            CONNREF_DIFF=$(jq -n --argjson new "$NEW_JSON" '
+              ($new.ConnectionReferences // []) | .[]
+              | "| `\(.LogicalName)` | (新規) | `\(.ConnectionId // "")` | 追加 |"
+            ' 2>/dev/null || echo "")
+          fi
+
+          BODY_FILE=$(mktemp)
+          {
+            echo "## PRD 接続情報 / 環境変数 を main に反映"
+            echo ""
+            echo "| 項目 | 値 |"
+            echo "|---|---|"
+            echo "| Solution | \`${SOLUTION_NAME}\` |"
+            echo "| 対象環境 | \`prd\` (\`deployment-settings.prd.json\`) |"
+            echo "| トリガ | maker-04 by @${ACTOR} |"
+            echo "| 起動 workflow | [run](${RUN_URL}) |"
+            echo "| 差分ファイル | \`${FILE}\` 1 ファイルのみ |"
+            echo ""
+            echo "## 変更項目"
+            echo ""
+            echo "### EnvironmentVariables の差分"
+            echo ""
+            if [ -n "$ENVVAR_DIFF" ]; then
+              echo "| SchemaName | 旧 Value | 新 Value | 種別 |"
+              echo "|---|---|---|---|"
+              echo "$ENVVAR_DIFF"
+            else
+              echo "_差分なし_"
+            fi
+            echo ""
+            echo "### ConnectionReferences の差分"
+            echo ""
+            if [ -n "$CONNREF_DIFF" ]; then
+              echo "| LogicalName | 旧 ConnectionId | 新 ConnectionId | 種別 |"
+              echo "|---|---|---|---|"
+              echo "$CONNREF_DIFF"
+            else
+              echo "_差分なし_"
+            fi
+            echo ""
+            echo "## 適用タイミング"
+            echo ""
+            echo "- この PR が main に merge された時点では **PRD 環境には反映されません** (settings JSON が main に置かれるだけ)。"
+            echo "- 次に **\`Maker - PRD 環境へデプロイ\`** (maker-02) を実行したとき、本ファイルの値で PRD に import されます。"
+            echo "- スライド 36 「ソース管理イメージ」の deploy-prd branch パターン: develop→main PR とは独立して走るため、develop に積んだ他 Solution の未検証 commit は同乗しません。"
+            echo ""
+            echo "## 後処理"
+            echo ""
+            echo "- CI green 後に **auto-merge** + 短命 branch \`${BRANCH}\` を自動削除。"
+          } > "$BODY_FILE"
+
+          PR_URL=$(gh pr create \
+            --base main \
+            --head "${BRANCH}" \
+            --title "release(prd-settings): ${SOLUTION_NAME}" \
+            --body-file "$BODY_FILE")
+          rm -f "$BODY_FILE"
+          echo "::notice::PR を起票しました: $PR_URL"
+          echo "PRD_PR_URL=$PR_URL" >> "$GITHUB_ENV"
+
+          # --delete-branch 付き auto-merge: merge 完了後に short-lived branch を自動削除
+          if gh pr merge --auto --merge --delete-branch "$PR_URL" 2>/tmp/automerge.err; then
+            echo "::notice::auto-merge を有効化しました (CI green 次第 merge + branch 削除)"
+          else
+            cat /tmp/automerge.err
+            echo "::notice::auto-merge を予約できないため (待つ条件なし)、即時 merge を実行します"
+            gh pr merge --merge --delete-branch "$PR_URL"
+            echo "::notice::PR を即時 merge し branch を削除しました"
+          fi
+
+      - name: Summary
+        env:
+          ENV_NAME: ${{ inputs.env }}
+          SOLUTION_NAME: ${{ inputs.solution_name }}
+        run: |
+          set -euo pipefail
+          REPO_URL="${{ github.server_url }}/${{ github.repository }}"
+          FILE="src/Solutions/${SOLUTION_NAME}/settings/deployment-settings.${ENV_NAME}.json"
+          {
+            echo "## ${FILE} を develop に更新しました"
+            echo ""
+            echo "- Solution: \`${SOLUTION_NAME}\`"
+            echo "- 環境: \`${ENV_NAME}\`"
+            echo "- ファイル (develop): [\`${FILE}\`](${REPO_URL}/blob/develop/${FILE})"
+            echo ""
+            if [ "${ENV_NAME}" = "prd" ]; then
+              if [ -n "${PRD_PR_URL:-}" ]; then
+                echo "### main への反映 (スライド 36 準拠の short-lived branch パターン)"
+                echo ""
+                echo "settings.prd.json 1 ファイルのみの PR を main へ auto-merge します: ${PRD_PR_URL}"
+                echo ""
+                echo "他 Solution の未検証 commit は同乗しません。"
+              else
+                echo "### main への反映"
+                echo ""
+                echo "main 上の settings.prd.json と差分なしのため、PR 起票不要。"
+              fi
+              echo ""
+              echo "**この時点では deploy されません**。CoE が Step 17 (deploy-to-prd) を Actions UI から起動します。"
+            else
+              echo "**この時点では deploy されません**。続けて \"Maker - STG 環境へデプロイ\" (maker-01) を押してください (Step 09)。"
+              echo ""
+              echo "この設定は、STG にデプロイされるタイミングで develop ごと main に取り込まれます (単独では main に出しません)。"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+

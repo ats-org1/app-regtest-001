@@ -1,0 +1,225 @@
+# Maker - STG 環境へデプロイ (再 export なし版)
+#
+# CICD コンパニオン App が未配備の案件で、Maker が GitHub Actions UI から STG デプロイを依頼するラッパー。
+#
+# 【動作】 develop → main の release PR を起票 → auto-merge → deploy-to-stg.yml が連鎖実行。
+# 再 export (DEV → develop) は行わない。ADR-015 で「STG デプロイは maker-00 (DEV から保存)
+# 前段必須」と定めたため、develop には常に最新 Solution と bump 済 Version が積まれている前提。
+# よって maker-01 は「現在の develop を main に流す」だけで足りる。
+#
+# 操作: Actions タブ → "Maker - STG 環境へデプロイ" → "Run workflow" → Solution 名 / 変更概要 → "Run"
+#
+# 前提:
+#   - 事前に maker-00 (DEV から保存) を実行済み (= 最新 Solution が develop に commit 済)
+#   - 初回 or Connection 再作成時は maker-03 / 04 で settings に値を埋め済 (未入力だと deploy-to-stg の preflight でブロック)
+
+name: Maker - STG 環境へデプロイ
+
+run-name: "STG デプロイ: ${{ inputs.solution_name }} (by @${{ github.actor }})"
+
+on:
+  workflow_dispatch:
+    inputs:
+      solution_name:
+        description: "デプロイする Solution の Unique Name (DEV で開発中のもの)"
+        required: true
+        type: string
+        default: "SampleSolution"
+      reason:
+        description: "変更概要 (PR 本文に転記、CoE レビュー用) - 200 字程度"
+        required: true
+        type: string
+        default: "営業ダッシュボードに新規ビューを追加"
+
+permissions:
+  actions: write         # deploy-to-stg.yml を即時 dispatch (即時 merge 経路) するため
+  contents: write        # gh pr merge / auto-merge enable に必要 (read だと GraphQL "Resource not accessible by integration")
+  pull-requests: write   # release PR の起票 + auto-merge
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (gh pr create が内部で git を呼ぶため必要)
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Open release PR (develop -> main)
+        id: pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOLUTION_NAME: ${{ inputs.solution_name }}
+          REASON: ${{ inputs.reason }}
+          ACTOR: ${{ github.actor }}
+          REPO_URL: ${{ github.server_url }}/${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          AHEAD=$(gh api "/repos/${{ github.repository }}/compare/main...develop" --jq '.ahead_by')
+          if [ "$AHEAD" = "0" ]; then
+            echo "::error::develop と main は同じ commit です。release する内容がありません。事前に maker-00 (DEV から保存) を実行して develop に変更を積んでください。"
+            exit 1
+          fi
+          echo "::notice::develop は main より ${AHEAD} commit 進んでいます。release PR を起票します。"
+
+          EXISTING=$(gh pr list --base main --head develop --json url --jq '.[0].url // empty')
+          if [ -n "$EXISTING" ]; then
+            echo "::notice::既存 release PR を使用: $EXISTING"
+            echo "pr_url=$EXISTING" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # ===== PR description schema 駆動生成 (P9-①) =====
+          # 環境オーナー / IT DRI が承認画面 "View environment" から飛んできたときに、
+          # 「何が変わるのか / 直前リリースとの差分 / 次のステップ」を 1 画面で把握できる構造にする。
+
+          # 旧 Version (main の Solution.xml から抽出、初回は未設定の可能性)
+          OLD_SRC="src/Solutions/${SOLUTION_NAME}/Other/Solution.xml"
+          if git show "origin/main:${OLD_SRC}" >/dev/null 2>&1; then
+            OLD_VER=$(git show "origin/main:${OLD_SRC}" | grep -oE '<Version>[0-9.]+</Version>' | head -1 | sed 's|</\{0,1\}Version>||g' || echo "")
+          fi
+          OLD_VER="${OLD_VER:-(初回 release / main 上に Solution.xml なし)}"
+
+          # 新 Version (develop の Solution.xml から抽出)
+          if git show "origin/develop:${OLD_SRC}" >/dev/null 2>&1; then
+            NEW_VER=$(git show "origin/develop:${OLD_SRC}" | grep -oE '<Version>[0-9.]+</Version>' | head -1 | sed 's|</\{0,1\}Version>||g' || echo "")
+          fi
+          NEW_VER="${NEW_VER:-(取得失敗)}"
+
+          # main..develop の commit 一覧 (最大 20 件)
+          COMMITS=$(git log --oneline --no-decorate "origin/main..origin/develop" -n 20 || echo "(取得失敗)")
+          COMMITS="${COMMITS:-(差分 commit なし)}"
+
+          # 変更ファイル概要 (shortstat + 主要パスごとの件数)
+          DIFFSTAT=$(git diff --shortstat "origin/main..origin/develop" || echo "(取得失敗)")
+          DIFFSTAT="${DIFFSTAT:-(差分なし)}"
+          CHANGED_FILES=$(git diff --name-only "origin/main..origin/develop" || true)
+          SRC_COUNT=$(echo "$CHANGED_FILES" | grep -c "^src/Solutions/" || true)
+          STG_SET_COUNT=$(echo "$CHANGED_FILES" | grep -c "deployment-settings\.stg\.json$" || true)
+          PRD_SET_COUNT=$(echo "$CHANGED_FILES" | grep -c "deployment-settings\.prd\.json$" || true)
+          WF_COUNT=$(echo "$CHANGED_FILES" | grep -c "^\.github/" || true)
+          SCRIPT_COUNT=$(echo "$CHANGED_FILES" | grep -c "^scripts/" || true)
+
+          # 直前リリース tag + Release URL (stg-verified のみ拾う、prd-verified は除外)
+          PREV_REL_JSON=$(gh release list --limit 20 --json tagName,url,isDraft,isPrerelease 2>/dev/null || echo "[]")
+          PREV_TAG=$(echo "$PREV_REL_JSON" | jq -r '[.[] | select(.tagName | test("-stg-verified$"))][0].tagName // empty')
+          PREV_URL=$(echo "$PREV_REL_JSON" | jq -r '[.[] | select(.tagName | test("-stg-verified$"))][0].url // empty')
+          if [ -z "$PREV_TAG" ]; then
+            PREV_TAG="(まだ stg-verified release なし)"
+            PREV_URL=""
+          fi
+
+          # body は temp file に書き出して --body-file で渡す (here-doc の改行・特殊文字を安全に扱う)
+          BODY_FILE=$(mktemp)
+          {
+            echo "## Release 概要"
+            echo ""
+            echo "| 項目 | 値 |"
+            echo "|---|---|"
+            echo "| Solution | \`${SOLUTION_NAME}\` |"
+            echo "| Version | \`${OLD_VER}\` → \`${NEW_VER}\` |"
+            echo "| トリガ | @${ACTOR} |"
+            echo "| 想定デプロイ先 | STG (Environment: \`stg\` → 自動 import) |"
+            echo "| 起動 workflow | [run #${{ github.run_id }}](${RUN_URL}) |"
+            echo ""
+            echo "**変更理由**:"
+            echo ""
+            echo "> ${REASON}"
+            echo ""
+            echo "## 含まれる commit (\`main..develop\`)"
+            echo ""
+            echo '```'
+            echo "$COMMITS"
+            echo '```'
+            echo ""
+            echo "## 変更ファイル概要"
+            echo ""
+            echo "${DIFFSTAT}"
+            echo ""
+            echo "| カテゴリ | 件数 |"
+            echo "|---|---|"
+            echo "| Solution source (\`src/Solutions/\`) | ${SRC_COUNT} |"
+            echo "| STG settings (\`deployment-settings.stg.json\`) | ${STG_SET_COUNT} |"
+            echo "| PRD settings (\`deployment-settings.prd.json\`) | ${PRD_SET_COUNT} |"
+            echo "| ワークフロー (\`.github/\`) | ${WF_COUNT} |"
+            echo "| スクリプト (\`scripts/\`) | ${SCRIPT_COUNT} |"
+            echo ""
+            echo "## 直前のリリース (\`-stg-verified\`)"
+            echo ""
+            if [ -n "$PREV_URL" ]; then
+              echo "- 直前 tag: [${PREV_TAG}](${PREV_URL})"
+            else
+              echo "- ${PREV_TAG}"
+            fi
+            echo ""
+            echo "## 次のステップ"
+            echo ""
+            echo "1. CI green 後に **auto-merge** → \`deploy-to-stg.yml\` 連鎖 → STG 環境に import"
+            echo "2. 環境オーナーが Environment **\`stg-verified\`** を承認 → \`v<Version>-stg-verified\` annotated tag + Release が自動生成 (managed zip attach)"
+            echo "3. PRD 反映は別途 \`Maker - PRD 環境へデプロイ\` (maker-02) を起動し、\`git_tag\` に上記 \`-stg-verified\` を指定"
+            echo ""
+            echo "## 留意"
+            echo ""
+            echo "- 純粋な app 変更のみの場合: CI green になり次第 auto-merge。"
+            echo "- \`settings/deployment-settings.*.json\` / \`.github/**\` / \`scripts/**\` を含む場合: CODEOWNERS (CoE) 承認後に auto-merge。"
+          } > "$BODY_FILE"
+
+          PR_URL=$(gh pr create \
+            --base main \
+            --head develop \
+            --title "release: ${SOLUTION_NAME} v${NEW_VER} ($(date -u +%Y-%m-%d))" \
+            --body-file "$BODY_FILE")
+          rm -f "$BODY_FILE"
+          echo "pr_url=$PR_URL" >> "$GITHUB_OUTPUT"
+          echo "::notice::release PR を起票しました: $PR_URL"
+
+      - name: Enable auto-merge (merge commit)
+        id: merge
+        if: steps.pr.outputs.pr_url != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # --squash ではなく --merge (true merge commit)。
+          # 理由: develop の history を圧縮すると「追加→削除」中間 commit が打ち消し合い、main 側に旧ファイルが残る副作用。
+          # auto-merge は必須 check がある場合のみ予約可能。即 merge 可能なら即時 merge にフォールバック。
+          MERGED_IMMEDIATELY=false
+          if gh pr merge --auto --merge "${{ steps.pr.outputs.pr_url }}" 2>/tmp/automerge.err; then
+            echo "::notice::auto-merge を有効化しました (CI / 必須レビュー完了次第 merge commit されます)"
+          else
+            cat /tmp/automerge.err
+            echo "::notice::auto-merge を予約できないため、即時 merge を実行します"
+            gh pr merge --merge --delete-branch=false "${{ steps.pr.outputs.pr_url }}"
+            echo "::notice::PR を即時 merge しました"
+            MERGED_IMMEDIATELY=true
+          fi
+          echo "merged_immediately=${MERGED_IMMEDIATELY}" >> "$GITHUB_OUTPUT"
+
+      - name: Trigger deploy-to-stg.yml (GITHUB_TOKEN 制約の回避)
+        if: steps.merge.outputs.merged_immediately == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # GITHUB_TOKEN による PR merge 由来の push は後続 workflow を発火させない仕様。
+          # 即時 merge の場合だけ明示 dispatch。
+          echo "::notice::deploy-to-stg.yml を明示 dispatch します (即時 merge の場合のみ)"
+          gh workflow run deploy-to-stg.yml \
+            --repo "${{ github.repository }}" \
+            --ref main \
+            -f solution_name="${{ inputs.solution_name }}"
+          echo "::notice::dispatch 完了。進捗: ${{ github.server_url }}/${{ github.repository }}/actions/workflows/deploy-to-stg.yml"
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## STG デプロイ依頼"
+            echo ""
+            echo "- Solution: ${{ inputs.solution_name }}"
+            echo "- 変更概要: ${{ inputs.reason }}"
+            if [ -n '${{ steps.pr.outputs.pr_url }}' ]; then
+              echo "- Release PR: ${{ steps.pr.outputs.pr_url }}"
+              echo "- 後続: PR auto-merge -> deploy-to-stg.yml -> verify-and-tag (環境オーナー承認) -> STG verified tag"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,21 @@
+# Power Platform CLI / pac unpack の作業ファイル
+out/
+.pac/
+*.zip
+*.msapp
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# 秘匿系（万一の漏洩防止）
+*.pfx
+*.snk
+*.key
+.env
+.env.*
+
+# ログ
+*.log

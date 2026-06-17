@@ -1,0 +1,81 @@
+# Maker - PRD 接続情報・環境変数 登録/更新
+#
+# 【代替案 (v0)】 CICD コンパニオン App が未配備の案件で、
+# Maker が GitHub Actions UI から直接 settings.prd.json を更新するためのラッパー。
+#
+# 内部的に update-connection.yml を dispatch する (env=prd 固定)。
+# maker-03-update-stg-settings.yml の PRD 版。
+#
+# 操作:
+#   1. 先に "Maker - DEV から保存" (maker-00) を押して develop に雛型
+#      (src/Solutions/<solution_name>/settings/deployment-settings.prd.json) を生成させておく。
+#      maker-00 の run ページ Summary の "prd" セクションからコピーアイコンでコピー。
+#   2. Actions タブ → "Maker - PRD 接続情報・環境変数 登録/更新" → "Run workflow"
+#   3. settings_json フィールドに編集後の JSON 全文を貼り付け
+#   4. "Run" を押下
+#
+# 前提:
+#   - PP メーカーポータルで PRD 環境の Connection を作成済み (GUID を取得済み)
+#   - PRD 接続は機密性が高い。Connection オーナーを CoE と相談して設定すること
+#
+# 完了後:
+#   - src/Solutions/<solution_name>/settings/deployment-settings.prd.json が develop に commit されます
+#   - **deploy はしません**。PRD 昇格は CoE の promote.yml 経由で実施されます
+#
+# 別案 (CoE 限定の逃げ道): GitHub Web エディタで
+#   src/Solutions/<solution_name>/settings/deployment-settings.prd.json を直接編集 → PR 起票 → merge も可だが、
+#   Maker には PR 起票操作の認知負荷が重いため推奨しない。事後の値微調整用。
+
+name: Maker - PRD 接続情報・環境変数 登録/更新
+
+run-name: "PRD 接続情報更新: ${{ inputs.solution_name }} (by @${{ github.actor }})"
+
+on:
+  workflow_dispatch:
+    inputs:
+      solution_name:
+        description: "Solution の Unique Name (PR タイトルに使用)"
+        required: true
+        type: string
+        default: "SampleSolution"
+      settings_json:
+        description: "deployment-settings.prd.json の新しい中身 (JSON 全文を貼り付け)"
+        required: true
+        type: string
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dispatch update-connection.yml (env=prd)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOLUTION_NAME: ${{ inputs.solution_name }}
+          SETTINGS_JSON: ${{ inputs.settings_json }}
+        run: |
+          set -euo pipefail
+
+          if ! echo "$SETTINGS_JSON" | jq -e 'type == "object"' > /dev/null; then
+            echo "::error::settings_json は valid な JSON オブジェクトである必要があります"
+            exit 1
+          fi
+
+          echo "::notice::Dispatching update-connection.yml (env=prd) for ${SOLUTION_NAME}"
+          # 内部 dispatch は常に develop ブランチから起動 (Maker のドロップダウン選択ミスを隠蔽)。
+          gh workflow run update-connection.yml \
+            --repo "${{ github.repository }}" \
+            --ref develop \
+            -f env=prd \
+            -f solution_name="${SOLUTION_NAME}" \
+            -f settings_json="${SETTINGS_JSON}"
+
+      - name: Show status link
+        run: |
+          ACTIONS_URL="${{ github.server_url }}/${{ github.repository }}/actions/workflows/update-connection.yml"
+          echo "::notice::PRD 接続情報の更新を開始しました。"
+          echo "::notice::進捗: ${ACTIONS_URL}"
+          echo "::notice::develop に commit されます (main には流れません)。PRD 昇格は CoE の promote.yml で実施されます"

@@ -1,0 +1,43 @@
+name: '03-deploy-to-stg'
+
+# main へのマージ後 (または手動) で STG 環境へ managed Solution を import する薄いラッパー。
+# 実体は coe-central-repo の _reusable-deploy-stg.yml にあり、preflight (Connection Reference
+# プレースホルダ検出) と build (managed pack) と deploy が中央で完結する。
+#
+# 【中央化の理由】Entra ID FIC が 20 件/SPN 上限のため、案件 repo ごとに FIC を
+# 追加する構成ではすぐに枯渇する。中央 reusable workflow + OIDC sub claim
+# customization により、FIC は中央 reusable workflow ごとに 1 個で全案件 repo から
+# 使える (DEVSTG SPN, subject = job_workflow_ref:<your-github-org>/coe-central-repo/.github/workflows/_reusable-deploy-stg.yml@refs/heads/main)。
+#
+# STEP-OWNER: 表 2 Step 9-10 (STG Deploy)。種別 = 自動。
+
+on:
+  push:
+    branches: [main]
+    paths:
+      # Solution サブフォルダ配下のファイルのみ対象 (1 階層以上深い場合に限定)。
+      # src/Solutions/.gitkeep や src/Solutions/README.md (テンプレ初期ファイル) では発火しない。
+      # → これにより provision 直後の初期 commit で空打ち deploy が起動する事象を防止。
+      - 'src/Solutions/*/**'
+  workflow_dispatch:
+    inputs:
+      solution_name:
+        description: 'Solution の Unique Name'
+        required: true
+        default: 'SampleSolution'
+
+permissions:
+  contents: write   # verify-and-tag job が caller repo に tag + Release を作成するため (ADR-013)
+  id-token: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  deploy:
+    uses: __COE_CENTRAL_OWNER__/coe-central-repo/.github/workflows/_reusable-deploy-stg.yml@main
+    with:
+      solution_name: ${{ inputs.solution_name || 'SampleSolution' }}
+      env_dev_url: ${{ vars.PP_ENV_DEV_URL }}
+      env_stg_url: ${{ vars.PP_ENV_STG_URL }}
+      app_client_id_devstg: ${{ vars.PP_APP_CLIENT_ID_DEVSTG }}
+      tenant_id: ${{ vars.PP_TENANT_ID }}

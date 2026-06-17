@@ -1,0 +1,38 @@
+name: '02-build-pack'
+
+# PR 時に走る検証 + managed Solution のビルドの薄いラッパー。
+# 実体は coe-central-repo の _reusable-build-pack.yml。
+# OIDC は使わないが、pac CLI バージョン / 静的解析ルールを中央で一括管理する目的で
+# 中央化している。
+#
+# STEP-OWNER: 表 2 Step 5 (Pack)。
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      # Solution サブフォルダ配下のファイルのみ対象 (1 階層以上深い場合に限定)。
+      # src/Solutions/.gitkeep や src/Solutions/README.md (テンプレ初期ファイル) では発火しない。
+      - 'src/Solutions/*/**'
+      - '.github/workflows/**'
+  workflow_call:
+    inputs:
+      solution_name:
+        description: 'Solution の Unique Name'
+        required: true
+        type: string
+        default: 'SampleSolution'
+    outputs:
+      artifact_name:
+        description: 'アップロードした managed solution の artifact 名'
+        value: ${{ jobs.build.outputs.artifact_name }}
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  build:
+    uses: __COE_CENTRAL_OWNER__/coe-central-repo/.github/workflows/_reusable-build-pack.yml@main
+    with:
+      solution_name: ${{ inputs.solution_name || 'SampleSolution' }}

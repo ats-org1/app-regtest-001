@@ -1,0 +1,70 @@
+name: '05-deploy-to-prd'
+
+# PRD 環境へ managed Solution を import する薄いラッパー。
+# 実体は coe-central-repo の _reusable-deploy-prd.yml にあり、preflight + Release 取得 +
+# PRD import が中央で完結する。
+#
+# 【A2 設計 (2026-06-04)】
+# - build は行わない (STG deploy 時に作った artifact を、maker-05 で Release に attach
+#   したものを git_tag で指定して download する)。
+# - 入口は `workflow_dispatch` のみ (promote.yml は廃止、γ-1/γ-2 切替は採らない)。
+# - GitHub Environments `prd` の reviewers 承認待ち (CoE が承認) は本ラッパー側ではなく
+#   中央 reusable workflow の deploy-prd job に environment: prd として宣言済み。
+# - PRD 専用 SPN を使用 (DEVSTG とは分離)。本ラッパーは DEVSTG SPN を渡さない
+#   (build がなく DEV に接続しないため)。
+#
+# 【中央化の理由】Entra ID FIC が 20 件/SPN 上限のため、案件 repo ごとに FIC を
+# 追加する構成ではすぐに枯渇する。中央 reusable workflow + OIDC sub claim
+# customization により、FIC は PRD SPN 用 1 個で全案件 repo から使える
+# (subject = job_workflow_ref:<your-github-org>/coe-central-repo/.github/workflows/_reusable-deploy-prd.yml@refs/heads/main)。
+#
+# 【操作 (Maker via maker-02-deploy-to-prd)】
+#   - Maker が `Maker - PRD 環境へデプロイ` (maker-02) ボタンを押すと、
+#     本 workflow が dispatch される。Maker が指定するのは:
+#       - solution_name
+#       - git_tag (= maker-05 env=stg で打った `v<version>-stg-verified`)
+#       - reason (任意)
+#   - 本 workflow は内部で中央 _reusable-deploy-prd.yml を呼び出し、
+#     environment: prd の reviewer (= CoE) 承認待ちに入る。
+#   - CoE は GitHub の通知メール / Actions ページの "Review deployments" から承認
+#     (= 二段ゲートのうちの実 gate)。
+#
+# 【CoE が直接押す逃げ道】
+#   maker-02 を経由せず CoE が Actions タブから本 workflow を直接 Run することも可能。
+#   Maker 不在 / 緊急ロールバック等のケースで使う。
+
+#
+# STEP-OWNER: 表 2 Step 17-18。
+
+on:
+  workflow_dispatch:
+    inputs:
+      solution_name:
+        description: 'Solution の Unique Name'
+        required: true
+        default: 'SampleSolution'
+      git_tag:
+        description: 'PRD に流す Release tag (例: v0.1.0-stg-verified)。maker-05 で作成済みのもの'
+        required: true
+        default: 'v0.1.0-stg-verified'
+      reason:
+        description: 'PRD deploy 理由 (任意。監査ログ用)'
+        required: false
+        default: ''
+
+permissions:
+  contents: write   # verify-and-tag job が caller repo に tag + Release を作成するため (ADR-013)
+  id-token: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  deploy:
+    uses: __COE_CENTRAL_OWNER__/coe-central-repo/.github/workflows/_reusable-deploy-prd.yml@main
+    with:
+      solution_name: ${{ inputs.solution_name }}
+      git_tag: ${{ inputs.git_tag }}
+      reason: ${{ inputs.reason }}
+      env_prd_url: ${{ vars.PP_ENV_PRD_URL }}
+      app_client_id_prd: ${{ vars.PP_APP_CLIENT_ID_PRD }}
+      tenant_id: ${{ vars.PP_TENANT_ID }}

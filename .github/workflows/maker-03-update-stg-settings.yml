@@ -1,0 +1,92 @@
+# Maker - STG 接続情報・環境変数 登録/更新
+#
+# 【代替案 (v0)】 CICD コンパニオン App が未配備の案件で、
+# Maker が GitHub Actions UI から直接 settings.stg.json を更新するためのラッパー。
+#
+# 内部的に update-connection.yml を dispatch する (env=stg 固定)。
+# 受け取った JSON で develop branch 上の
+# src/Solutions/<solution_name>/settings/deployment-settings.stg.json を
+# 丸ごと上書き → develop に直 commit (Option A: 2026-06-04 より main には流さない)。
+# main へは次回の "Maker - STG 環境へデプロイ" (maker-01) で develop ごと取り込まれる。
+#
+# 操作:
+#   1. 先に "Maker - DEV から保存" (maker-00) を押して、develop に最新 source +
+#      設定雛型 (src/Solutions/<solution_name>/settings/deployment-settings.stg.json) を生成させておく。
+#      maker-00 の run ページの Summary に生成された JSON が表示されるので
+#      コピーアイコンでコピー。
+#   2. Actions タブ → "Maker - STG 接続情報・環境変数 登録/更新" → "Run workflow"
+#   3. settings_json フィールドにコピーした JSON を貼り付け、値を編集
+#      - ConnectionReferences[].ConnectionId に Connection 作成画面で取得した GUID を貼付
+#      - EnvironmentVariables[] の Value を埋める
+#   4. "Run" を押下
+#
+# 前提:
+#   - PP メーカーポータルで STG 環境の Connection を作成済み (GUID を取得済み)
+#   - 雛型生成済み (maker-00 を一度以上押していること)
+#
+# 完了後:
+#   - settings.stg.json が develop に commit されます
+#   - **deploy はしません**。続けて "Maker - STG 環境へデプロイ" (maker-01) を実行してください
+#   - deploy-to-stg.yml の preflight で空 Value / placeholder は fail させるため、
+#     未入力のまま maker-01 を押しても STG には達せる前に止まる
+#
+# 別案 (CoE 限定の逃げ道):
+#   - GitHub Web エディタで src/Solutions/<solution_name>/settings/deployment-settings.stg.json を
+#     直接編集 → PR 起票も可だが、Maker には branch 名決め / PR タイトル記入 / Enable auto-merge
+#     操作が重いため推奨しない。CoE が deploy 後に低リスクな値 (デバッグ用
+#     フラグ等) をホットフィックスで修正するときの逃げ道として位置付け。
+
+name: Maker - STG 接続情報・環境変数 登録/更新
+
+run-name: "STG 接続情報更新: ${{ inputs.solution_name }} (by @${{ github.actor }})"
+
+on:
+  workflow_dispatch:
+    inputs:
+      solution_name:
+        description: "Solution の Unique Name (PR タイトルに使用)"
+        required: true
+        type: string
+        default: "SampleSolution"
+      settings_json:
+        description: "deployment-settings.stg.json の新しい中身 (JSON 全文を貼り付け)"
+        required: true
+        type: string
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dispatch update-connection.yml (env=stg)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOLUTION_NAME: ${{ inputs.solution_name }}
+          SETTINGS_JSON: ${{ inputs.settings_json }}
+        run: |
+          set -euo pipefail
+
+          # 簡易 validate: JSON object か
+          if ! echo "$SETTINGS_JSON" | jq -e 'type == "object"' > /dev/null; then
+            echo "::error::settings_json は valid な JSON オブジェクトである必要があります"
+            exit 1
+          fi
+
+          echo "::notice::Dispatching update-connection.yml (env=stg) for ${SOLUTION_NAME}"
+          # 内部 dispatch は常に develop ブランチから起動 (Maker のドロップダウン選択ミスを隠蔽)。
+          gh workflow run update-connection.yml \
+            --repo "${{ github.repository }}" \
+            --ref develop \
+            -f env=stg \
+            -f solution_name="${SOLUTION_NAME}" \
+            -f settings_json="${SETTINGS_JSON}"
+
+      - name: Show status link
+        run: |
+          ACTIONS_URL="${{ github.server_url }}/${{ github.repository }}/actions/workflows/update-connection.yml"
+          echo "::notice::STG 接続情報の更新を開始しました。"
+          echo "::notice::進捗: ${ACTIONS_URL}"
+          echo "::notice::develop に commit されます (main には流れません)。続けて 'Maker - STG 環境へデプロイ' (maker-01) を押してください (本 workflow は deploy しません)"

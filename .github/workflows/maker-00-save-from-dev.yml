@@ -1,0 +1,122 @@
+# Maker - DEV から保存 (STG には流さない)
+#
+# 【何をする workflow か】
+# DEV 環境の今の状態を PP から export し、リポジトリの `develop` branch に commit します。
+# 加えて、export した Solution の定義 (EnvironmentVariableDefinitions /
+# ConnectionReferences) を見て `src/Solutions/<solution_name>/settings/deployment-settings.<stg|prd>.json` の雛型を
+# 生成・既存値マージし、これも develop に commit します (Option A: 2026-06-04 より)。
+# STG / PRD には流れません。Maker は branch という概念を意識する必要はありません。
+#
+# 【こういう時に使う】
+#   - DEV で Solution に Env Var / Connection Reference を追加・変更した直後
+#     (settings 雛型を最新化させておかないと、次の maker-03/04 で値を入れられない)
+#   - 大改修の前に今の状態を残しておきたい
+#   - デモ前のバックアップ
+#   - 「今日ここまで作った」 という週次の作業記録
+#   - 別の Maker に「今の DEV を見せたい」 引き渡し
+#
+# 【リリース動線との関係】
+#   - 本 workflow              : DEV → develop branch (保存のみ、雛型も同時生成)
+#   - "Maker - STG へリリース" : DEV → develop (保存 + 雛型生成) → main (PR auto-merge) → STG デプロイ
+#
+#   develop に保存した状態は、後で "Maker - STG へリリース" を実行すれば
+#   そのままリリースに使えます。
+#
+# 【ロールバック / 過去状態への復元】
+#   develop に保存された各状態は commit として残ります。
+#   「あの時点に戻したい」 となったら "Maker - 過去バージョンへ復元" (実装予定)
+#   を使ってください。
+#
+# 【前提】
+#   - DEV 環境で対象 Solution が開発済み (unmanaged)
+#
+# STEP-OWNER: 表 2 Step 08.6 (Export「保存のみ」) + Step 08.5b-init (雛型生成) を本ボタン 1 つで吸収。
+
+name: Maker - DEV から保存
+
+run-name: "DEV 保存: ${{ inputs.solution_name }} (by @${{ github.actor }})"
+
+on:
+  workflow_dispatch:
+    inputs:
+      solution_name:
+        description: "保存する Solution の Unique Name (DEV で開発中のもの)"
+        required: true
+        type: string
+        default: "SampleSolution"
+      bump_type:
+        description: "Version の上げ幅 (ADR-008)。99% は revision で良い。STG へリリースする予定があるなら patch 以上を選ぶ。"
+        required: true
+        type: choice
+        default: "revision"
+        options:
+          - revision
+          - patch
+          - minor
+          - major
+      reason:
+        description: "保存理由 (後で見て分かるように) - 例: '大改修前のバックアップ' / '6/20 デモ用に凍結'"
+        required: true
+        type: string
+        default: "大改修前のバックアップ"
+
+permissions:
+  actions: write   # 内部 workflow を dispatch するために必要
+  contents: read
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dispatch export-from-dev.yml (保存のみ、リリースしない)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOLUTION_NAME: ${{ inputs.solution_name }}
+          BUMP_TYPE: ${{ inputs.bump_type }}
+          REASON: ${{ inputs.reason }}
+        run: |
+          set -euo pipefail
+          echo "::notice::DEV から保存を開始: ${SOLUTION_NAME} (bump=${BUMP_TYPE})"
+          # 内部 dispatch は常に develop ブランチから起動する。
+          # → Maker が Web UI の "Use workflow from" で main を選んでしまっても、
+          #    内部の _reusable-export は develop 上の最新 workflow 定義で動作し、
+          #    雨型も develop に commit される。ドロップダウン選択ミスを隠蔽。
+          gh workflow run export-from-dev.yml \
+            --repo "${{ github.repository }}" \
+            --ref develop \
+            -f solution_name="${SOLUTION_NAME}" \
+            -f bump_type="${BUMP_TYPE}" \
+            -f reason="[保存] ${REASON}" \
+            -f open_release_pr=false
+
+      - name: Show status link
+        env:
+          SOLUTION_NAME: ${{ inputs.solution_name }}
+        run: |
+          ACTIONS_URL="${{ github.server_url }}/${{ github.repository }}/actions/workflows/export-from-dev.yml"
+          REPO_FULL="${{ github.repository }}"
+          # private repo では raw.githubusercontent.com は 404 を返す (Web セッション認証を見ない仕様)。
+          # github.com/<owner>/<repo>/raw/<branch>/<path> を使えば Web 認証が効くので private でも 200 が返る。
+          RAW_BASE="${{ github.server_url }}/${REPO_FULL}/raw/develop/src/Solutions/${SOLUTION_NAME}/settings"
+          BLOB_BASE="${{ github.server_url }}/${REPO_FULL}/blob/develop/src/Solutions/${SOLUTION_NAME}/settings"
+          echo "::notice::保存リクエストを受け付けました。"
+          echo "::notice::進捗: ${ACTIONS_URL}"
+          {
+            echo "## 保存リクエストを受け付けました"
+            echo ""
+            echo "- 対象 Solution: \`${SOLUTION_NAME}\`"
+            echo "- 進捗: [01-export-from-dev workflow runs](${ACTIONS_URL})"
+            echo ""
+            echo "### 完了後 (数分後) の確認"
+            echo ""
+            echo "develop branch に Solution source + 設定雛型が commit されます (STG/PRD には流れません)。"
+            echo ""
+            echo "**雛型 JSON は完了後 下記リンクから直接取得できます** (内部 export workflow の Summary にも同じリンクが出ます):"
+            echo ""
+            echo "- **STG** 雛型 raw (Ctrl+A → Ctrl+C でコピー): [deployment-settings.stg.json](${RAW_BASE}/deployment-settings.stg.json)"
+            echo "  - GitHub UI: [${BLOB_BASE}/deployment-settings.stg.json](${BLOB_BASE}/deployment-settings.stg.json)"
+            echo "- **PRD** 雛型 raw: [deployment-settings.prd.json](${RAW_BASE}/deployment-settings.prd.json)"
+            echo "  - GitHub UI: [${BLOB_BASE}/deployment-settings.prd.json](${BLOB_BASE}/deployment-settings.prd.json)"
+            echo ""
+            echo "雛型の値を入れて反映するには maker-03 (STG) / maker-04 (PRD) の \`settings_json\` 欄に編集後 JSON を貼り付けてください。"
+          } >> "$GITHUB_STEP_SUMMARY"
