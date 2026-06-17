@@ -46,7 +46,7 @@ permissions:
 
 jobs:
   export:
-    uses: __COE_CENTRAL_OWNER__/coe-central-repo/.github/workflows/_reusable-export.yml@main
+    uses: ats-org1/coe-central-repo/.github/workflows/_reusable-export.yml@main
     with:
       solution_name: ${{ inputs.solution_name }}
       bump_type: ${{ inputs.bump_type }}
