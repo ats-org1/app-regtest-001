@@ -11,18 +11,6 @@
       },
       "TypeId": 100000000,
       "IsRequired": false
-    },
-    {
-      "SchemaName": "regtest_DummyOrphanEnvVar",
-      "Value": "manual-test-value-stg",
-      "Name": {
-        "Default": "Dummy orphan EnvVar (test 04)",
-        "ByLcid": {
-          "1041": "Dummy orphan EnvVar (test 04)"
-        }
-      },
-      "TypeId": 100000000,
-      "IsRequired": false
     }
   ],
   "ConnectionReferences": [
@@ -30,11 +18,6 @@
       "LogicalName": "sample_OutlookDemo",
       "ConnectionId": "bf9d19248c4d44e4b46d9b97b7b3e414",
       "ConnectorId": "/providers/Microsoft.PowerApps/apis/shared_office365"
-    },
-    {
-      "LogicalName": "regtest_DummyOrphanCR",
-      "ConnectionId": "00000000000000000000000000000000",
-      "ConnectorId": "/providers/Microsoft.PowerApps/apis/shared_dummy"
     }
   ],
   "CopilotAgents": []
