@@ -2,15 +2,7 @@
   "EnvironmentVariables": [
     {
       "SchemaName": "sample_APIBaseURLDemo",
-      "Value": "https://api.contoso.com/v1",
-      "Name": {
-        "Default": "API Base URL (Demo)",
-        "ByLcid": {
-          "1041": "API Base URL (Demo)"
-        }
-      },
-      "TypeId": 100000000,
-      "IsRequired": false
+      "Value": "https://api.contoso.com/v2"
     }
   ],
   "ConnectionReferences": [
@@ -19,6 +11,5 @@
       "ConnectionId": "e80fcd00588940dbb86b06d0c4763cd2",
       "ConnectorId": "/providers/Microsoft.PowerApps/apis/shared_office365"
     }
-  ],
-  "CopilotAgents": []
+  ]
 }
